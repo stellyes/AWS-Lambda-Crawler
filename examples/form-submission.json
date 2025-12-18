@@ -1,0 +1,67 @@
+{
+  "url": "https://example-form-site.com/submit-form",
+  "actions": [
+    {
+      "type": "wait",
+      "xpath": "//form",
+      "state": "visible"
+    },
+    {
+      "type": "fill",
+      "xpath": "//input[@id='first-name']",
+      "value": "John"
+    },
+    {
+      "type": "fill",
+      "xpath": "//input[@id='last-name']",
+      "value": "Doe"
+    },
+    {
+      "type": "fill",
+      "xpath": "//input[@id='email']",
+      "value": "john.doe@example.com"
+    },
+    {
+      "type": "select",
+      "xpath": "//select[@id='country']",
+      "value": "US",
+      "by_label": false
+    },
+    {
+      "type": "click",
+      "xpath": "//input[@id='terms-checkbox']"
+    },
+    {
+      "type": "screenshot",
+      "name": "form-before-submit"
+    },
+    {
+      "type": "click",
+      "xpath": "//button[@id='submit-button']",
+      "wait_for_navigation": true
+    },
+    {
+      "type": "wait",
+      "xpath": "//div[contains(@class, 'success-message')]",
+      "state": "visible",
+      "timeout": 10000
+    },
+    {
+      "type": "screenshot",
+      "name": "form-after-submit"
+    },
+    {
+      "type": "extract",
+      "xpath": "//span[@class='confirmation-number']",
+      "name": "confirmation_number"
+    }
+  ],
+  "config": {
+    "timeout": 30000,
+    "wait_until": "domcontentloaded"
+  },
+  "metadata": {
+    "form_type": "registration",
+    "automated": "true"
+  }
+}

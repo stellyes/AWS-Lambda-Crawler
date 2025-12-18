@@ -1,0 +1,50 @@
+{
+  "url": "https://example-login-site.com/login",
+  "actions": [
+    {
+      "type": "wait",
+      "xpath": "//form[@id='login-form']",
+      "state": "visible"
+    },
+    {
+      "type": "login",
+      "username_xpath": "//input[@id='username']",
+      "password_xpath": "//input[@id='password']",
+      "submit_xpath": "//button[@id='login-button']",
+      "wait_after_submit": 2000
+    },
+    {
+      "type": "wait",
+      "xpath": "//div[contains(@class, 'dashboard')]",
+      "state": "visible",
+      "timeout": 10000
+    },
+    {
+      "type": "screenshot",
+      "name": "after-login",
+      "full_page": true
+    },
+    {
+      "type": "extract",
+      "xpath": "//span[@class='user-name']",
+      "name": "logged_in_user"
+    },
+    {
+      "type": "extract",
+      "xpath": "//div[@class='account-balance']",
+      "name": "account_balance"
+    }
+  ],
+  "config": {
+    "timeout": 30000,
+    "wait_until": "networkidle",
+    "viewport": {
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  "metadata": {
+    "purpose": "daily-balance-check",
+    "schedule": "0 8 * * *"
+  }
+}

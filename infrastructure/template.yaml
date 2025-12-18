@@ -1,0 +1,371 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS Serverless Web Crawler (Python)
+  Cost-effective web crawler with browser automation using Lambda, SQS, and Playwright
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+  
+  MaxConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 100
+    Description: Maximum concurrent Lambda executions
+
+  RetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues:
+      - 1
+      - 3
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+    Description: CloudWatch logs retention in days
+
+Resources:
+  # ============================================
+  # ECR Repository for Lambda Container
+  # ============================================
+  
+  CrawlerECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'crawler-function-${Environment}'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # SQS Queues
+  # ============================================
+  
+  # Main task queue
+  CrawlerTaskQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'CrawlerTaskQueue-${Environment}'
+      VisibilityTimeout: 360  # 6x Lambda timeout
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CrawlerDLQ.Arn
+        maxReceiveCount: 3  # Retry 3 times before DLQ
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Dead Letter Queue for failed tasks
+  CrawlerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'CrawlerDLQ-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # S3 Bucket for Results
+  # ============================================
+  
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'crawler-results-${AWS::AccountId}-${Environment}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldResults
+            Status: Enabled
+            ExpirationInDays: 30
+            Prefix: results/
+          - Id: ExpireOldScreenshots
+            Status: Enabled
+            ExpirationInDays: 7
+            Prefix: screenshots/
+          - Id: ExpireOldHtml
+            Status: Enabled
+            ExpirationInDays: 3
+            Prefix: html/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # Secrets Manager (Empty Secret Template)
+  # ============================================
+  
+  CrawlerSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'crawler/website-credentials-${Environment}'
+      Description: Website credentials for the crawler
+      SecretString: '{"username":"placeholder","password":"placeholder"}'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # Lambda Functions
+  # ============================================
+  
+  # Main crawler function (container image)
+  CrawlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'CrawlerFunction-${Environment}'
+      PackageType: Image
+      ImageUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/crawler-function-${Environment}:latest'
+      Description: Web crawler with browser automation (Python + Playwright)
+      MemorySize: 2048
+      Timeout: 60
+      Architectures:
+        - x86_64
+      ReservedConcurrentExecutions: !Ref MaxConcurrency
+      Environment:
+        Variables:
+          SECRETS_ARN: !Ref CrawlerSecrets
+          RESULTS_BUCKET: !Ref ResultsBucket
+          LOG_LEVEL: INFO
+          BROWSER_TIMEOUT: '30000'
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # SQS permissions
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt CrawlerTaskQueue.Arn
+            # S3 permissions
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub '${ResultsBucket.Arn}/*'
+            # Secrets Manager permissions
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: 
+                - !Ref CrawlerSecrets
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:crawler/*'
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CrawlerTaskQueue.Arn
+            BatchSize: 1  # Process one task at a time for browser stability
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      Tags:
+        Environment: !Ref Environment
+    Metadata:
+      DockerTag: latest
+      DockerContext: ../
+      Dockerfile: Dockerfile
+
+  # Task submitter function (Python runtime - no container needed)
+  TaskSubmitterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'TaskSubmitterFunction-${Environment}'
+      Runtime: python3.12
+      Handler: src.handlers.task_submitter.handler
+      CodeUri: ../
+      Description: API endpoint for submitting crawl tasks
+      MemorySize: 256
+      Timeout: 10
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref CrawlerTaskQueue
+          LOG_LEVEL: INFO
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: !GetAtt CrawlerTaskQueue.Arn
+      Events:
+        SubmitTask:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: POST
+            RestApiId: !Ref CrawlerApi
+        SubmitTaskOptions:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: OPTIONS
+            RestApiId: !Ref CrawlerApi
+      Tags:
+        Environment: !Ref Environment
+
+  # ============================================
+  # API Gateway
+  # ============================================
+  
+  CrawlerApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'CrawlerApi-${Environment}'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Tags:
+        Environment: !Ref Environment
+
+  # ============================================
+  # CloudWatch Log Groups
+  # ============================================
+  
+  CrawlerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/CrawlerFunction-${Environment}'
+      RetentionInDays: !Ref RetentionDays
+
+  TaskSubmitterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/TaskSubmitterFunction-${Environment}'
+      RetentionInDays: !Ref RetentionDays
+
+  # ============================================
+  # CloudWatch Alarms
+  # ============================================
+  
+  # Alarm for DLQ messages
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'CrawlerDLQ-Messages-${Environment}'
+      AlarmDescription: Alarm when messages appear in the DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CrawlerDLQ.QueueName
+
+  # Alarm for Lambda errors
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'CrawlerFunction-Errors-${Environment}'
+      AlarmDescription: Alarm when crawler function has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CrawlerFunction
+
+# ============================================
+# Outputs
+# ============================================
+
+Outputs:
+  CrawlerFunctionArn:
+    Description: Crawler Lambda function ARN
+    Value: !GetAtt CrawlerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrawlerFunctionArn'
+
+  ECRRepositoryUri:
+    Description: ECR Repository URI for crawler container
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${CrawlerECRRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  TaskQueueUrl:
+    Description: SQS Queue URL for submitting tasks
+    Value: !Ref CrawlerTaskQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskQueueUrl'
+
+  TaskQueueArn:
+    Description: SQS Queue ARN
+    Value: !GetAtt CrawlerTaskQueue.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskQueueArn'
+
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref CrawlerDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-DLQUrl'
+
+  ResultsBucketName:
+    Description: S3 bucket for crawler results
+    Value: !Ref ResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ResultsBucket'
+
+  SecretsArn:
+    Description: Secrets Manager ARN for credentials
+    Value: !Ref CrawlerSecrets
+    Export:
+      Name: !Sub '${AWS::StackName}-SecretsArn'
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${CrawlerApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/tasks'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'

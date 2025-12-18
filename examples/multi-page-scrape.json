@@ -1,0 +1,70 @@
+{
+  "url": "https://example-ecommerce.com/products",
+  "actions": [
+    {
+      "type": "wait",
+      "xpath": "//div[@class='product-grid']",
+      "state": "visible"
+    },
+    {
+      "type": "extract",
+      "xpath": "//div[@class='product-card']//span[@class='product-name']",
+      "attribute": "inner_text",
+      "multiple": true,
+      "name": "product_names"
+    },
+    {
+      "type": "extract",
+      "xpath": "//div[@class='product-card']//span[@class='product-price']",
+      "attribute": "inner_text",
+      "multiple": true,
+      "name": "product_prices"
+    },
+    {
+      "type": "extract",
+      "xpath": "//div[@class='product-card']//a[@class='product-link']",
+      "attribute": "href",
+      "multiple": true,
+      "name": "product_urls"
+    },
+    {
+      "type": "screenshot",
+      "name": "product-listing-page-1",
+      "full_page": true
+    },
+    {
+      "type": "click",
+      "xpath": "//div[@class='pagination']//a[@class='next-page']",
+      "wait_for_navigation": true
+    },
+    {
+      "type": "wait",
+      "xpath": "//div[@class='product-grid']",
+      "state": "visible"
+    },
+    {
+      "type": "extract",
+      "xpath": "//div[@class='product-card']//span[@class='product-name']",
+      "attribute": "inner_text",
+      "multiple": true,
+      "name": "product_names_page2"
+    },
+    {
+      "type": "screenshot",
+      "name": "product-listing-page-2",
+      "full_page": true
+    }
+  ],
+  "config": {
+    "timeout": 30000,
+    "wait_until": "networkidle",
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    }
+  },
+  "metadata": {
+    "scrape_type": "product-catalog",
+    "category": "electronics"
+  }
+}
